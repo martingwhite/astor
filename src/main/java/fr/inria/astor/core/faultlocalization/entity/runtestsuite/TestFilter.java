@@ -9,7 +9,6 @@ import org.junit.runner.RunWith;
 
 import junit.framework.TestCase;
 
-
 /**
  * ClassTester implementation to retrieve JUnit4 test classes in the classpath.
  * You can specify if you want to include jar files in the search and you can
@@ -24,36 +23,39 @@ public class TestFilter implements ClassFilter {
 
 	public TestFilter() {
 		this.searchInJars = true;
-		this.testTypes = new TestType[]{TestType.JUNIT38_TEST_CLASSES,TestType.RUN_WITH_CLASSES,TestType.TEST_CLASSES};
+		this.testTypes = new TestType[] { TestType.JUNIT38_TEST_CLASSES, TestType.RUN_WITH_CLASSES,
+				TestType.TEST_CLASSES };
 	}
-	
+
 	public TestFilter(boolean searchInJars) {
 		this.searchInJars = searchInJars;
-		this.testTypes = new TestType[]{TestType.JUNIT38_TEST_CLASSES,TestType.RUN_WITH_CLASSES,TestType.TEST_CLASSES};
+		this.testTypes = new TestType[] { TestType.JUNIT38_TEST_CLASSES, TestType.RUN_WITH_CLASSES,
+				TestType.TEST_CLASSES };
 	}
-	
+
 	public TestFilter(TestType[] suiteTypes) {
 		this.searchInJars = true;
 		this.testTypes = suiteTypes;
 	}
 
-	public TestFilter(boolean searchInJars,
-			TestType[] suiteTypes) {
+	public TestFilter(boolean searchInJars, TestType[] suiteTypes) {
 		this.searchInJars = searchInJars;
 		this.testTypes = suiteTypes;
 	}
 
 	public boolean acceptClass(Class<?> clazz) {
-		//We directly ignore abstract class
+		// We directly ignore abstract class
 		if (isAbstractClass(clazz)) {
 			return false;
 		}
-		//--
+		// --
 		if (isInSuiteTypes(TestType.TEST_CLASSES)) {
 			if (acceptTestClass(clazz)) {
 				return true;
 			}
-
+			if (acceptTestClassJUnit5(clazz)) {
+				return true;
+			}
 		}
 		if (isInSuiteTypes(TestType.JUNIT38_TEST_CLASSES)) {
 			if (acceptJUnit38Test(clazz)) {
@@ -91,9 +93,48 @@ public class TestFilter implements ClassFilter {
 				if (method.getAnnotation(Test.class) != null) {
 					return true;
 				}
+
+				for (java.lang.annotation.Annotation iAnnot : method.getAnnotations()) {
+					String name = iAnnot.toString();
+					// if (name.contains(".Test"))
+					// return true;
+				}
 			}
 		} catch (NoClassDefFoundError ignore) {
+		} catch (java.lang.VerifyError e) {
+			System.out.println("Error analyzing class " + clazz.getName());
+
+			e.printStackTrace();
+
+		} catch (java.lang.ClassFormatError er) {
+			System.err.println("Error trucated class " + clazz.getName());
 		}
+
+		return false;
+	}
+
+	private boolean acceptTestClassJUnit5(Class<?> clazz) {
+		if (isAbstractClass(clazz)) {
+			return false;
+		}
+
+		try {
+			for (Method method : clazz.getMethods()) {
+				if (method.getAnnotation(org.junit.jupiter.api.Test.class) != null) {
+					return true;
+				}
+
+			}
+		} catch (NoClassDefFoundError ignore) {
+		} catch (java.lang.VerifyError e) {
+			System.out.println("Error analyzing class " + clazz.getName());
+
+			e.printStackTrace();
+
+		} catch (java.lang.ClassFormatError er) {
+			System.err.println("Error trucated class " + clazz.getName());
+		}
+
 		return false;
 	}
 

@@ -3,23 +3,39 @@ package fr.inria.astor.core.manipulation.sourcecode;
 import java.io.File;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
+import java.util.stream.Collectors;
 
 import org.apache.log4j.Logger;
 
+import fr.inria.astor.core.manipulation.MutationSupporter;
 import fr.inria.astor.core.setup.ConfigurationProperties;
+import fr.inria.astor.core.setup.RandomManager;
+import fr.inria.astor.core.solutionsearch.spaces.ingredients.scopes.IngredientPoolScope;
+import fr.inria.astor.core.solutionsearch.spaces.ingredients.transformations.NGramManager;
 import spoon.reflect.code.CtBlock;
+import spoon.reflect.code.CtFieldAccess;
 import spoon.reflect.code.CtFieldRead;
 import spoon.reflect.code.CtFieldWrite;
+import spoon.reflect.code.CtFor;
+import spoon.reflect.code.CtForEach;
+import spoon.reflect.code.CtIf;
+import spoon.reflect.code.CtLiteral;
 import spoon.reflect.code.CtLocalVariable;
 import spoon.reflect.code.CtTypeAccess;
 import spoon.reflect.code.CtVariableAccess;
 import spoon.reflect.code.CtVariableRead;
 import spoon.reflect.code.CtVariableWrite;
+import spoon.reflect.code.CtWhile;
 import spoon.reflect.declaration.CtClass;
 import spoon.reflect.declaration.CtElement;
 import spoon.reflect.declaration.CtField;
@@ -28,11 +44,14 @@ import spoon.reflect.declaration.CtPackage;
 import spoon.reflect.declaration.CtParameter;
 import spoon.reflect.declaration.CtVariable;
 import spoon.reflect.declaration.ModifierKind;
+import spoon.reflect.reference.CtArrayTypeReference;
 import spoon.reflect.reference.CtFieldReference;
 import spoon.reflect.reference.CtLocalVariableReference;
+import spoon.reflect.reference.CtParameterReference;
 import spoon.reflect.reference.CtTypeReference;
 import spoon.reflect.reference.CtVariableReference;
 import spoon.reflect.visitor.CtScanner;
+import spoon.reflect.visitor.filter.PotentialVariableDeclarationFunction;
 
 /**
  * Variable manipulations: methods to analyze variables and scope
@@ -136,6 +155,60 @@ public class VariableResolver {
 		return collectVariableAccess(element, false);
 	}
 
+	public static List<CtVariableAccess> collectVariableRead(CtElement element) {
+		List<CtVariableAccess> varaccess = new ArrayList<>();
+		List<String> varaccessCacheNames = new ArrayList<>();
+		CtScanner sc = new CtScanner() {
+
+			public void add(CtVariableAccess e) {
+				if (!varaccessCacheNames.contains(e.getVariable().getSimpleName()))
+					varaccess.add(e);
+				varaccessCacheNames.add(e.getVariable().getSimpleName());
+			}
+
+			@Override
+			public <T> void visitCtVariableRead(CtVariableRead<T> variableRead) {
+				super.visitCtVariableRead(variableRead);
+				add(variableRead);
+			}
+
+			@Override
+			public <T> void visitCtTypeAccess(CtTypeAccess<T> typeAccess) {
+				super.visitCtTypeAccess(typeAccess);
+				// varaccess.add(typeAccess);
+			}
+
+			@Override
+			public <T> void visitCtFieldRead(CtFieldRead<T> fieldRead) {
+				super.visitCtFieldRead(fieldRead);
+				add(fieldRead);
+			}
+
+		};
+
+		sc.scan(element);
+
+		return varaccess;
+
+	}
+
+	public static List<CtVariableAccess> collectVariableReadIgnoringBlocks(CtElement element) {
+
+		if (element instanceof CtIf) {
+			return collectVariableRead(((CtIf) element).getCondition());
+		}
+		if (element instanceof CtWhile) {
+			return collectVariableRead(((CtWhile) element).getLoopingExpression());
+		}
+
+		if (element instanceof CtFor) {
+			return collectVariableRead(((CtFor) element).getExpression());
+		}
+
+		return collectVariableRead(element);
+
+	}
+
 	/**
 	 * Return all variables related to the element passed as argument
 	 * 
@@ -144,12 +217,13 @@ public class VariableResolver {
 	 */
 	public static List<CtVariableAccess> collectVariableAccess(CtElement element, boolean duplicates) {
 		List<CtVariableAccess> varaccess = new ArrayList<>();
-
+		List<String> varaccessCacheNames = new ArrayList<>();
 		CtScanner sc = new CtScanner() {
 
 			public void add(CtVariableAccess e) {
-				if (duplicates || !varaccess.contains(e))
+				if (duplicates || !varaccessCacheNames.contains(e.getVariable().getSimpleName()))
 					varaccess.add(e);
+				varaccessCacheNames.add(e.getVariable().getSimpleName());
 			}
 
 			@Override
@@ -190,16 +264,73 @@ public class VariableResolver {
 
 	}
 
+	public static List<CtVariableAccess> collectVariableAccessIgnoringBlocks(CtElement element) {
+
+		if (element instanceof CtIf) {
+			return collectVariableAccess(((CtIf) element).getCondition());
+		}
+		if (element instanceof CtWhile) {
+			return collectVariableAccess(((CtWhile) element).getLoopingExpression());
+		}
+
+		if (element instanceof CtFor) {
+			return collectVariableAccess(((CtFor) element).getExpression());
+		}
+
+		return collectVariableAccess(element);
+
+	}
+
+	public static List<CtLiteral> collectLiterals(CtElement element) {
+
+		List<CtLiteral> literalsValues = new ArrayList<>();
+
+		CtScanner scanner = new CtScanner() {
+
+			@Override
+			public <T> void visitCtLiteral(CtLiteral<T> literal) {
+
+				super.visitCtLiteral(literal);
+				if (!literalsValues.contains(literal))
+					literalsValues.add(literal);
+			}
+
+		};
+
+		scanner.scan(element);
+
+		return literalsValues;
+	}
+
+	public static List<CtLiteral> collectLiteralsNoString(CtElement element) {
+
+		List<CtLiteral> literalsValues = new ArrayList<>();
+
+		CtScanner scanner = new CtScanner() {
+
+			@Override
+			public <T> void visitCtLiteral(CtLiteral<T> literal) {
+
+				super.visitCtLiteral(literal);
+				if (!literalsValues.contains(literal) && !"String".equals(literal.getType().getSimpleName()))
+					literalsValues.add(literal);
+			}
+
+		};
+
+		scanner.scan(element);
+
+		return literalsValues;
+	}
+
 	/**
 	 * 
 	 * This methods determines whether all the variable access contained in a
-	 * CtElement passes as parameter match with a variable from a set of
-	 * variables given as argument. Both variable Types and Names are compared,
+	 * CtElement passes as parameter match with a variable from a set of variables
+	 * given as argument. Both variable Types and Names are compared,
 	 * 
-	 * @param varContext
-	 *            List of variables to match
-	 * @param element
-	 *            element to extract the var access to match
+	 * @param varContext List of variables to match
+	 * @param element    element to extract the var access to match
 	 * @return
 	 */
 	public static boolean fitInPlace(List<CtVariable> varContext, CtElement element) {
@@ -208,19 +339,46 @@ public class VariableResolver {
 
 	/**
 	 * This methods determines whether all the variable access contained in a
-	 * CtElement passes as parameter match with a variable from a set of
-	 * variables given as argument. The argument <code>matchName </code>
-	 * indicates whether Type and Names are compared (value true), only type
-	 * (false).
+	 * CtElement passes as parameter match with a variable from a set of variables
+	 * given as argument. The argument <code>matchName </code> indicates whether
+	 * Type and Names are compared (value true), only type (false).
 	 * 
-	 * @param varContext
-	 *            List of variables to match
-	 * @param ingredientCtElement
-	 *            element to extract the var access to match
+	 * @param varContext          List of variables to match
+	 * @param ingredientCtElement element to extract the var access to match
 	 * @return
 	 */
 	public static boolean fitInContext(List<CtVariable> varContext, CtElement ingredientCtElement, boolean matchName) {
 
+		Map<CtVariableAccess, List<CtVariable>> matched = getMapping(varContext, ingredientCtElement, matchName);
+		if (matched == null)
+			return false;
+
+		return checkMapping(matched).isEmpty();
+
+	}
+
+	public static List<CtVariableAccess> checkMapping(Map<CtVariableAccess, List<CtVariable>> matched) {
+		List<CtVariableAccess> notMapped = new ArrayList<>();
+
+		if (matched == null)
+			return notMapped;
+
+		// Now, we analyze if all access were matched
+		for (CtVariableAccess ctVariableAccess : matched.keySet()) {
+			List<CtVariable> mapped = matched.get(ctVariableAccess);
+			if (mapped.isEmpty()) {
+				// One var access was not mapped
+				// return false;
+				notMapped.add(ctVariableAccess);
+			}
+		}
+		// All VarAccess were mapped
+		// return true;
+		return notMapped;
+	}
+
+	public static Map<CtVariableAccess, List<CtVariable>> getMapping(List<CtVariable> varContext,
+			CtElement ingredientCtElement, boolean matchName) throws IllegalAccessError {
 		// We collect all var access from the ingredient
 		List<CtVariableAccess> varAccessCollected = collectVariableAccess(ingredientCtElement);
 
@@ -238,7 +396,7 @@ public class VariableResolver {
 		boolean nameConflict = nameConflict(varContext, varInductionCollected);
 		if (nameConflict) {
 			logger.debug("Name Conflict " + varAccessCollected);
-			return false;
+			return null;
 		}
 
 		// Now, we search for access to public variable
@@ -252,68 +410,49 @@ public class VariableResolver {
 
 		// Now, we match the remain var access.
 		Map<CtVariableAccess, List<CtVariable>> matched = matchVars(varContext, varAccessCollected, matchName);
-		// Now, we analyze if all access were matched
-		for (CtVariableAccess ctVariableAccess : matched.keySet()) {
-			List<CtVariable> mapped = matched.get(ctVariableAccess);
-			if (mapped.isEmpty()) {
-				// One var access was not mapped
-				return false;
-			}
-		}
-		// All VarAccess were mapped
-		return true;
-
+		return matched;
 	}
 
 	/**
 	 * 
 	 */
-	public static VarMapping mapVariables(List<CtVariable> varContext, CtElement ingredientCtElement) {
+	public static VarMapping mapVariablesUsingCluster(List<CtVariable> varContext, CtElement ingredientCtElement) {
 
 		// var out-of scope, list of variables compatibles
-		Map<VarWrapper, List<CtVariable>> varMaps = new HashMap<>();
-		List<CtVariableAccess> notMappedVariables = new ArrayList<>();
-
-		ClassLoader classLoader = VariableResolver.class.getClassLoader();
+		Map<VarAccessWrapper, List<CtVariable>> varsMaps = new HashMap<>();
+		List<CtVariableAccess> varsNotMapped = new ArrayList<>();
 
 		Map<String, List<String>> clusters = cluster
 				.readClusterFile(Paths.get(ConfigurationProperties.getProperty("learningdir") + File.separator
 						+ ConfigurationProperties.getProperty("clusteringfilename")));
 
 		List<CtVariableAccess> variablesOutOfScope = retriveVariablesOutOfContext(varContext, ingredientCtElement);
-		logger.debug("vars out of context: " + variablesOutOfScope);
-		for (CtVariableAccess wOut : variablesOutOfScope) {
+		logger.debug("#vars out of context: " + variablesOutOfScope.size());
+		for (CtVariableAccess variableOutScope : variablesOutOfScope) {
 
-			List<String> wcluster = clusters.get(wOut.getVariable().getSimpleName());
+			List<String> wcluster = clusters.get(variableOutScope.getVariable().getSimpleName());
 
 			if (wcluster == null) {
-				logger.debug("variable our of scope without context: " + wOut);
+				logger.debug("variable our of scope without context: " + variableOutScope);
 				continue;
 			}
-			logger.debug("--var  out of context: " + wOut + ", with wcluster " + wcluster);
+			logger.debug("--var  out of context: " + variableOutScope + ", with wcluster size " + wcluster.size());
 
 			boolean mapped = false;
-			VarWrapper varOutWrapper = new VarWrapper(wOut);
+			VarAccessWrapper varOutWrapper = new VarAccessWrapper(variableOutScope);
 			for (String wordFromCluster : wcluster) {// In order
 
 				List<CtVariable> varExist = existVariableWithName(varContext, wordFromCluster);
 				// check compatibility between varExist and wout
-				for (CtVariable varFromCluster : varExist) {
-					CtTypeReference typeref_i = varFromCluster.getType();
-					try {
-						if (typeref_i.isSubtypeOf(wOut.getType())) {
-							List<CtVariable> vars = varMaps.get(varOutWrapper);
-							if (vars == null) {
-								vars = new ArrayList<>();
-								varMaps.put(varOutWrapper, vars);
-							}
-							vars.add(varFromCluster);
+				for (CtVariable varInScope : varExist) {
+					boolean sameNames = variableOutScope.getVariable().getSimpleName()
+							.equals(varInScope.getSimpleName());
+					if (!sameNames) {
+						boolean compatibleVariables = areVarsCompatible(variableOutScope, varInScope);
+						if (compatibleVariables) {
+							addVarMappingAsResult(varsMaps, varOutWrapper, varInScope);
 							mapped = true;
-							// We do not break the loop, we want to find all
-							// mappings
 						}
-					} catch (Exception e) {
-						logger.error(e);
 					}
 				}
 
@@ -321,37 +460,126 @@ public class VariableResolver {
 			// if the var was not matched, we put in list of variables out of
 			// scope not mapped.
 			if (!mapped)
-				notMappedVariables.add(wOut);
+				varsNotMapped.add(variableOutScope);
 
 		}
-		VarMapping mappings = new VarMapping(varMaps, notMappedVariables);
+		VarMapping mappings = new VarMapping(varsMaps, varsNotMapped);
 		return mappings;
 
-		// : finds all variables *out of scope* from 'Ing'.
-		// 2: for each var 'wout' from *out of scope* do
-		// 2.a: finds line 'Lwo' corresponding to 'out' var in clustering.csv to
-		// retrieve the cluster of 'wout'
-		// 2.b: for each word 'wcluster' from 'Lwo' // as they sorted by
-		// embedding
-		// distance, it iterates from left to right
-		// 2.b.1: Search if there is one variable 'wcontext' with name
-		// 'wcluster' in
-		// scope.// here, we invoke to the VariableResolver.
-		// 2.b.2: Check compatibility of types from 'wcontext' and 'wout' vars
-		// 2.b.2.1: if they are compatibles replace 'wout'' by 'wcontent' on
-		// 'Ing';
-		// break loop (2.b).
-		// 2.b.2.2: else (vars not compatibles) continue loop.
+	}
 
+	public static VarMapping mapVariablesFromContext(List<CtVariable> varContext, CtElement ingredientCtElement) {
+
+		List<CtVariableAccess> variablesOutOfScope = VariableResolver.retriveVariablesOutOfContext(varContext,
+				ingredientCtElement);
+
+		return mapVariablesFromContext(varContext, variablesOutOfScope);
+	}
+
+	public static VarMapping mapVariablesFromContext(List<CtVariable> varContext,
+			List<CtVariableAccess> variablesOutOfScope) {
+
+		// var out-of scope, list of variables compatibles
+		Map<VarAccessWrapper, List<CtVariable>> varsMaps = new HashMap<>();
+
+		List<CtVariableAccess> varsNotMapped = new ArrayList<>();
+		logger.debug("#vars out of context: " + variablesOutOfScope.size());
+		// For each var out of scopt
+		for (CtVariableAccess variableOutScope : variablesOutOfScope) {
+
+			boolean mapped = false;
+			VarAccessWrapper varOutWrapper = new VarAccessWrapper(variableOutScope);
+			// For each var in context
+			for (CtVariable varInScope : varContext) {
+
+				boolean sameNames = variableOutScope.getVariable().getSimpleName().equals(varInScope.getSimpleName());
+				// if (!sameNames) {
+				boolean compatibleVariables = areVarsCompatible(variableOutScope, varInScope);
+				if (compatibleVariables) {
+					addVarMappingAsResult(varsMaps, varOutWrapper, varInScope);
+					mapped = true;
+				}
+				// }
+			}
+			// if the var was not matched, we put in list of variables out of
+			// scope not mapped.
+			if (!mapped)
+				varsNotMapped.add(variableOutScope);
+
+		}
+		VarMapping mappings = new VarMapping(varsMaps, varsNotMapped);
+		return mappings;
+
+	}
+
+	/**
+	 * Return true if the variables are compatible
+	 * 
+	 * @param varOutScope
+	 * @param varInScope
+	 * @return
+	 */
+	public static boolean areVarsCompatible(CtVariableAccess varOutScope, CtVariable varInScope) {
+		CtTypeReference refCluster = varInScope.getType();
+		CtTypeReference refOut = varOutScope.getType();
+
+		return areTypesCompatible(refCluster, refOut);
+	}
+
+	public static boolean areTypesCompatible(CtTypeReference type1, CtTypeReference type2) {
+		try {// Check if an existing variable (name taken from
+				// cluster)
+				// is compatible with with that one out of scope
+
+			boolean bothArray = false;
+			boolean notCompatible = false;
+			do {
+				// We check if types are arrays.
+				boolean clusterIsArray = type1 instanceof CtArrayTypeReference;
+				boolean ourIsArray = type2 instanceof CtArrayTypeReference;
+
+				if (clusterIsArray ^ ourIsArray) {
+					notCompatible = true;
+
+				}
+				// if both are arrays, we extract the component
+				// type, and we compare it again
+				bothArray = clusterIsArray && ourIsArray;
+				if (bothArray) {
+					type1 = ((CtArrayTypeReference) type1).getComponentType();
+					type2 = ((CtArrayTypeReference) type2).getComponentType();
+				}
+
+			} while (bothArray);
+
+			if (notCompatible)
+				return false;
+
+			if (type1.isSubtypeOf(type2)) {
+				return true;
+			}
+		} catch (Exception e) {
+			logger.error(e);
+		}
+		return false;
+	}
+
+	private static void addVarMappingAsResult(Map<VarAccessWrapper, List<CtVariable>> varMaps,
+			VarAccessWrapper varOutWrapper, CtVariable varInContext) {
+		List<CtVariable> vars = varMaps.get(varOutWrapper);
+		if (vars == null) {
+			vars = new ArrayList<>();
+			varMaps.put(varOutWrapper, vars);
+		}
+		if (!vars.stream().filter(e -> e.getSimpleName().equals(varInContext.getSimpleName())).findAny().isPresent())
+			vars.add(varInContext);
 	}
 
 	/**
 	 * Returns the variables that have as name the string passed as argument.
 	 * 
-	 * @param varContext
-	 *            variables
-	 * @param wordFromCluster
-	 *            name of a variable
+	 * @param varContext      variables
+	 * @param wordFromCluster name of a variable
 	 * @return
 	 */
 	public static List<CtVariable> existVariableWithName(List<CtVariable> varContext, String wordFromCluster) {
@@ -368,10 +596,19 @@ public class VariableResolver {
 	 */
 	public static List<CtVariableAccess> retriveVariablesOutOfContext(List<CtVariable> varContext,
 			CtElement ingredientCtElement) {
-		List<CtVariableAccess> variablesOutOfScope = new ArrayList<>();
 		boolean duplicated = true;
-		List<CtVariableAccess> allVariables = collectVariableAccess(ingredientCtElement, duplicated);
-		for (CtVariableAccess variableAccessFromElement : allVariables) {
+		List<CtVariableAccess> allVariablesFromElement = collectVariableAccess(ingredientCtElement, duplicated);
+		return retriveVariablesOutOfContext(varContext, allVariablesFromElement);
+	}
+
+	/**
+	 * Retrieves the variables out of scope from the element given a context.
+	 */
+	public static List<CtVariableAccess> retriveVariablesOutOfContext(List<CtVariable> varContext,
+			List<CtVariableAccess> variablesToChech) {
+		List<CtVariableAccess> variablesOutOfScope = new ArrayList<>();
+
+		for (CtVariableAccess variableAccessFromElement : variablesToChech) {
 			if (!fitInPlace(varContext, variableAccessFromElement)) {
 				variablesOutOfScope.add(variableAccessFromElement);
 			}
@@ -386,17 +623,23 @@ public class VariableResolver {
 		for (CtVariableAccess ctVariableAccess : varAccessCollected) {
 			CtVariableReference varref = ctVariableAccess.getVariable();
 
-			// an access to a static must be a static field.
-			if (!(varref instanceof CtFieldReference)) {
-				continue;
-			}
-
-			CtVariable var = varref.getDeclaration();
-			if (var == null || var.getModifiers().contains(ModifierKind.STATIC)) {
+			if (isStatic(varref)) {
 				statics.add(ctVariableAccess);
 			}
 		}
 		return statics;
+	}
+
+	public static boolean isStatic(CtVariableReference varref) {
+
+		if (!(varref instanceof CtFieldReference)) {
+			return false;
+		}
+
+		CtFieldReference fieldRef = (CtFieldReference) varref;
+
+		return fieldRef.isStatic();
+
 	}
 
 	/**
@@ -471,8 +714,7 @@ public class VariableResolver {
 			boolean insideIngredient = checkParent(var, ingredientRootElement);
 			if (insideIngredient)
 				induction.add(ctVariableAccess);
-			// logger.debug("var decl " + var + " indution " +
-			// insideIngredient);
+
 		}
 		return induction;
 	}
@@ -488,13 +730,63 @@ public class VariableResolver {
 		if (rootElement == null)
 			logger.error("Error! root element null");
 		CtElement parent = var;
-		while (parent != null && !CtPackage.TOP_LEVEL_PACKAGE_NAME.equals(parent.toString())) {
-			if (parent.toString().equals(rootElement.toString()))
+		while (parent != null
+				&& !(parent instanceof CtPackage)/*
+													 * && !CtPackage. TOP_LEVEL_PACKAGE_NAME. equals(parent.toString())
+													 */) {
+			if (parent.equals(rootElement))
 				return true;
 			parent = parent.getParent();
 		}
 
 		return false;
+	}
+
+	@SuppressWarnings("unchecked")
+	public static boolean changeShadowedVars(CtElement origin, CtElement destination) {
+		boolean changed = false;
+		List<CtVariableAccess> varAccessCollected = VariableResolver.collectVariableAccess(destination);
+		logger.debug("vars from patch " + varAccessCollected);
+		for (CtVariableAccess ctVariableAccess : varAccessCollected) {
+
+			logger.debug(
+					"--> var from patch: " + ctVariableAccess + " " + ctVariableAccess.getClass().getCanonicalName());
+			if (ctVariableAccess instanceof CtFieldAccess) {
+				CtFieldAccess f = (CtFieldAccess) ctVariableAccess;
+
+				CtField<?> field = f.getVariable().getFieldDeclaration();
+
+				List<CtVariable<?>> vars = origin.map(new PotentialVariableDeclarationFunction(field.getSimpleName()))
+						.list();
+				if (vars.size() > 0) {
+					for (CtVariable<?> ctVariable : vars) {
+
+						if (ctVariable != field) {
+							logger.debug("SameName: " + ctVariable);
+							if (ctVariable instanceof CtParameter) {
+								CtParameterReference pr = MutationSupporter.getFactory()
+										.createParameterReference((CtParameter) ctVariable);
+								CtVariableRead vr = (CtVariableRead) MutationSupporter.getFactory().createVariableRead(
+										pr, ctVariable.getModifiers().contains(ModifierKind.STATIC));
+
+								ctVariableAccess.replace(vr);
+							} else if (ctVariable instanceof CtLocalVariable) {
+								CtLocalVariableReference pr = MutationSupporter.getFactory()
+										.createLocalVariableReference((CtLocalVariable) ctVariable);
+								CtVariableRead vr = (CtVariableRead) MutationSupporter.getFactory().createVariableRead(
+										pr, ctVariable.getModifiers().contains(ModifierKind.STATIC));
+								ctVariableAccess.replace(vr);
+
+							}
+							changed = true;
+
+						}
+					}
+
+				}
+			}
+		}
+		return changed;
 	}
 
 	/**
@@ -545,23 +837,53 @@ public class VariableResolver {
 		// We find the parent block and we extract the local variables before
 		// the element under analysis
 		CtBlock parentblock = element.getParent(CtBlock.class);
+		CtElement currentElement = element;
 		if (parentblock != null) {
-			int positionEl = parentblock.getStatements().indexOf(element);
+			int positionEl = parentblock.getStatements().indexOf(currentElement);
 			variables.addAll(VariableResolver.retrieveLocalVariables(positionEl, parentblock));
+			if (ConfigurationProperties.getPropertyBool("consideryvarloops")) {
+				variables.addAll(getVarsInFor(currentElement));
+				variables.addAll(getVarsInForEach(currentElement));
+			}
+
 		}
 
 		return variables;
 
 	}
 
+	private static List<CtLocalVariable> getVarsInFor(CtElement element) {
+		List<CtLocalVariable> variables = new ArrayList<CtLocalVariable>();
+		CtElement currentElement = element;
+		CtFor ff = currentElement.getParent(CtFor.class);
+		while (ff != null) {
+			variables.addAll(ff.getForInit().stream().filter(e -> e instanceof CtLocalVariable)
+					.map(CtLocalVariable.class::cast).collect(Collectors.toList()));
+
+			ff = ff.getParent(CtFor.class);
+
+		}
+		return variables;
+	}
+
+	private static List<CtLocalVariable> getVarsInForEach(CtElement element) {
+		List<CtLocalVariable> variables = new ArrayList<CtLocalVariable>();
+		CtElement currentElement = element;
+		CtForEach ff = currentElement.getParent(CtForEach.class);
+		while (ff != null) {
+			variables.add((CtLocalVariable) ff.getVariable());
+			ff = ff.getParent(CtForEach.class);
+
+		}
+		return variables;
+	}
+
 	/**
-	 * Return the local variables of a block from the beginning until the
-	 * element located at positionEl.
+	 * Return the local variables of a block from the beginning until the element
+	 * located at positionEl.
 	 * 
-	 * @param positionEl
-	 *            analyze variables from the block until that position.
-	 * @param pb
-	 *            a block to search the local variables
+	 * @param positionEl analyze variables from the block until that position.
+	 * @param pb         a block to search the local variables
 	 * @return
 	 */
 	protected static List<CtLocalVariable> retrieveLocalVariables(int positionEl, CtBlock pb) {
@@ -598,118 +920,323 @@ public class VariableResolver {
 	}
 
 	/**
-	 * Adapt the ingredient to the destination according to the mapping. We
-	 * directly manipulate the variables from the ingredient, which are stored
-	 * in VarMapping
+	 * Adapt the ingredient to the destination according to the mapping. We directly
+	 * manipulate the variables from the ingredient, which are stored in VarMapping
 	 * 
 	 * @param varMapping
 	 * @param destination
-	 * @return it returns the original variable reference of each converted
-	 *         variable
+	 * @return it returns the original variable reference of each converted variable
 	 */
-	public static Map<CtVariableAccess, CtVariableReference> convertIngredient(VarMapping varMapping,
+	@SuppressWarnings("unchecked")
+	public static Map<VarAccessWrapper, CtVariableAccess> convertIngredient(VarMapping varMapping,
 			Map<String, CtVariable> mapToFollow) {
 
-		Map<CtVariableAccess, CtVariableReference> originalMap = new HashMap<>();
+		Map<VarAccessWrapper, CtVariableAccess> originalMap = new HashMap<>();
 
-		Map<VarWrapper, List<CtVariable>> mappedVars = varMapping.getMappedVariables();
-		for (VarWrapper var : mappedVars.keySet()) {
+		Map<VarAccessWrapper, List<CtVariable>> mappedVars = varMapping.getMappedVariables();
+		for (VarAccessWrapper var : mappedVars.keySet()) {
 			CtVariable varNew = mapToFollow.get(var.getVar().getVariable().getSimpleName());
-			originalMap.put(var.getVar(), var.getVar().getVariable());
-			var.getVar().setVariable(varNew.getReference());
-		}
+			//
+			CtVariableReference newVarReference = varNew.getReference();
 
+			CtVariableAccess originalVarAccessDestination = var.getVar();
+			CtVariableAccess newVarAccessDestination = null;
+
+			// if the var to reference is a local or parameter
+			if (newVarReference instanceof CtLocalVariableReference
+					|| newVarReference instanceof CtParameterReference) {
+				// let's check the destination Writes or Reads
+				if (originalVarAccessDestination instanceof CtFieldWrite
+						|| originalVarAccessDestination instanceof CtVariableWrite) {
+					// We replace the Write by a Var writter
+					newVarAccessDestination = MutationSupporter.getFactory().Core().createVariableWrite();
+					newVarAccessDestination.setVariable(newVarReference);
+
+				} else { // read
+					newVarAccessDestination = MutationSupporter.getFactory().Code().createVariableRead(newVarReference,
+							varNew.hasModifier(ModifierKind.STATIC));
+				}
+
+			} else
+			// else, if we want to reference a field
+			if (newVarReference instanceof CtFieldReference) {
+				// let's check the destination, write or read
+				if (originalVarAccessDestination instanceof CtFieldWrite<?>
+						|| originalVarAccessDestination instanceof CtFieldRead<?>) {
+					newVarAccessDestination = MutationSupporter.getFactory().Core().createFieldWrite();
+
+				} else {
+					newVarAccessDestination = MutationSupporter.getFactory().Core().createFieldRead();
+
+				}
+				newVarAccessDestination.setVariable(newVarReference);
+			}
+			// At the end, for all cases:
+			if (newVarAccessDestination != null) {
+				originalMap.put(new VarAccessWrapper(newVarAccessDestination), originalVarAccessDestination);
+				originalVarAccessDestination.replace(newVarAccessDestination);
+			} else {
+				logger.error("No destination resolved");
+			}
+
+		} // end for
 		return originalMap;
 	}
 
 	/**
-	 * For each modified variable, it resets the variables by putting their
-	 * original var reference
+	 * For each modified variable, it resets the variables by putting their original
+	 * var reference
 	 * 
 	 * @param varMapping
 	 * @param original
 	 */
-	public static void resetIngredient(VarMapping varMapping, Map<CtVariableAccess, CtVariableReference> original) {
 
-		Map<VarWrapper, List<CtVariable>> mappedVars = varMapping.getMappedVariables();
-		for (VarWrapper var : mappedVars.keySet()) {
-			CtVariableReference varNew = original.get(var.getVar());
-			var.getVar().setVariable(varNew);
+	public static void resetIngredient(Map<VarAccessWrapper, CtVariableAccess> old) {
+		for (VarAccessWrapper newa : old.keySet()) {
+			newa.getVar().replace(old.get(newa));
+
 		}
+
+	}
+
+	public static IngredientPoolScope determineIngredientScope(CtElement ingredient, CtElement fix) {
+
+		File ingp = ingredient.getPosition().getFile();
+		File fixp = fix.getPosition().getFile();
+
+		if (ingp == null || fixp == null)
+			return null;
+
+		if (ingp.getAbsolutePath().equals(fixp.getAbsolutePath())) {
+			return IngredientPoolScope.LOCAL;
+		}
+		if (ingp.getParentFile().getAbsolutePath().equals(fixp.getParentFile().getAbsolutePath())) {
+			return IngredientPoolScope.PACKAGE;
+		}
+		return IngredientPoolScope.GLOBAL;
+	}
+
+	@Deprecated
+	protected IngredientPoolScope determineIngredientScope(CtElement modificationpoint, CtElement selectedFix,
+			List<?> ingredients) {
+		// This is the original ingredient scope
+		IngredientPoolScope orig = VariableResolver.determineIngredientScope(modificationpoint, selectedFix);
+
+		String fixStr = selectedFix.toString();
+
+		// Now, we search for equivalent fixes with different scopes
+		for (Object ing : ingredients) {
+			try {
+				ing.toString();
+			} catch (Exception e) {
+				// if we cannot print the ingredient, we return
+				logger.error(e.toString());
+				continue;
+			}
+			// if it's the same fix
+			if (ing.toString().equals(fixStr)) {
+				IngredientPoolScope n = VariableResolver.determineIngredientScope(modificationpoint, (CtElement) ing);
+				// if the scope of the ingredient ing is narrower than the fix,
+				// we keep it.
+				if (n.ordinal() < orig.ordinal()) {
+					orig = n;
+					// if it's local, we return
+					if (IngredientPoolScope.values()[0].equals(orig))
+						return orig;
+				}
+
+			}
+		}
+		return orig;
+	}
+
+	public static List<Map<String, CtVariable>> findAllVarMappingCombination(
+			Map<VarAccessWrapper, List<CtVariable>> mappedVars) {
+		NGramManager managerngram = null;
+		return findAllVarMappingCombination(mappedVars, managerngram);
 	}
 
 	/**
 	 * 
-	 * Method that finds all combination of variables mappings Ex: if var 'a'
-	 * can be mapped to a1 and a2, and var 'b' to b1 and b2, the method return
-	 * all combinations (a1,b1), (a2,b1), (a1,b2), (a2,b2)
+	 * Method that finds all combination of variables mappings Ex: if var 'a' can be
+	 * mapped to a1 and a2, and var 'b' to b1 and b2, the method return all
+	 * combinations (a1,b1), (a2,b1), (a1,b2), (a2,b2)
 	 * 
-	 * @param mappedVars
-	 *            map of variables (out-of-scope) and candidate replacements of
-	 * @param currentCombination
-	 *            current combination of variables
+	 * @param mappedVars map of variables (out-of-scope) and candidate replacements
+	 *                   of
 	 * @return
 	 */
 	public static List<Map<String, CtVariable>> findAllVarMappingCombination(
-			Map<VarWrapper, List<CtVariable>> mappedVars) {
+			Map<VarAccessWrapper, List<CtVariable>> mappedVars, NGramManager managerngram) {
 
-		List<Map<String, CtVariable>> allCombinationsOne = new ArrayList<>();
-
-		if (!mappedVars.isEmpty()) {
-			List<VarWrapper> varNamesOne = new ArrayList<>(mappedVars.keySet());
-
-			VariableResolver.findAllVarMappingCombination(mappedVars, varNamesOne, 0, new TreeMap<>(),
-					allCombinationsOne);
+		if (mappedVars.isEmpty()) {
+			return new ArrayList<Map<String, CtVariable>>();
 		}
-		return allCombinationsOne;
+
+		List<VarAccessWrapper> varsNamesToCombine = new ArrayList<>(mappedVars.keySet());
+
+		List<Map<String, CtVariable>> allCombinations = new ArrayList<>();
+		allCombinations.add(new TreeMap<>());
+
+		Number[] maxValues = getMaxCombination(mappedVars, varsNamesToCombine);
+
+		long numberTotalComb = (long) maxValues[0];
+		double maxPerVarLimit = (double) maxValues[1];
+		try {
+			for (VarAccessWrapper currentVar : varsNamesToCombine) {
+
+				if (allCombinations.size() > 0
+						&& allCombinations.get(0).containsKey(currentVar.getVar().getVariable().getSimpleName())) {
+					logger.debug("Var already mapped: " + currentVar.getVar().getVariable().getSimpleName());
+					continue;
+				}
+
+				List<Map<String, CtVariable>> generationCombinations = new ArrayList<>();
+
+				List<CtVariable> mapped = mappedVars.get(currentVar);
+
+				List<CtVariable> sortedVariables = new ArrayList<>(mapped);
+
+				if (managerngram == null) {
+					logger.debug("Sorting variables Randomly: " + sortedVariables.size());
+					Collections.shuffle(sortedVariables, RandomManager.getRandom());
+				} else {
+					logger.debug("Sorting variables by 1-gram");
+					Collections.sort(sortedVariables, new Comparator<CtVariable>() {
+
+						@Override
+						public int compare(CtVariable v1, CtVariable v2) {
+							String s1 = v1.getSimpleName();
+							String s2 = v2.getSimpleName();
+
+							Double p1 = (Double) managerngram.getNgglobal().ngrams[1].getProbabilies().get(s1);
+							Double p2 = (Double) managerngram.getNgglobal().ngrams[1].getProbabilies().get(s2);
+
+							if (p1 == null && p2 == null) {
+								return 0;
+							}
+
+							if (p1 == null) {
+								logger.debug("Var not found in global ngram: " + s1);
+								return 1;
+							}
+							if (p2 == null) {
+								logger.debug("Var not found in global ngram: " + s2);
+								return -1;
+							}
+							return Double.compare(p2, p1);
+						}
+					});
+					// logger.debug("vars sorted "+sortedVariables);
+				}
+
+				// Now, let's create the combinations:
+				int varsAnalyzed = 0;
+				// for each mapping candidate
+				for (CtVariable varFromMap : sortedVariables) {
+					// We count the variables that can be mapped for that
+					// combination.
+
+					for (Map<String, CtVariable> previousCombination : allCombinations) {
+
+						// we create the new var combination from the previous
+						// one
+						Map<String, CtVariable> newCombination = new TreeMap<>(previousCombination);
+						// we add the map for the variable to the new
+						// combination
+						newCombination.put(currentVar.getVar().getVariable().getSimpleName(), varFromMap);
+						generationCombinations.add(newCombination);
+					}
+					varsAnalyzed++;
+					if (varsAnalyzed >= ((int) (Math.ceil(maxPerVarLimit)))) {
+						break;
+					}
+
+				}
+				allCombinations = generationCombinations;
+			}
+		} catch (Throwable e) {
+			logger.error("Problems when calculating combinations, nr vars " + mappedVars.size()
+					+ " teorical combinations: " + Arrays.toString(maxValues));
+			logger.error(e);
+			return new ArrayList<Map<String, CtVariable>>();
+		}
+		// FIlter combinations that are empty
+		allCombinations = allCombinations.stream().filter(e -> !e.isEmpty()).collect(Collectors.toList());
+
+		int maxNumberCombinations = ConfigurationProperties.getPropertyInt("maxVarCombination");
+
+		logger.debug("NrVarCombinationsConsideredBeforeCutting: " + allCombinations.size());
+		if (allCombinations.size() > maxNumberCombinations) {
+			allCombinations = allCombinations.subList(0, maxNumberCombinations);
+		}
+
+		logger.debug("NrVarCombinationsConsideredAfter: " + allCombinations.size());
+
+		for (Map<String, CtVariable> map : allCombinations) {
+			if (map.keySet().size() != varsNamesToCombine.size()) {
+				// logger.error("Missing vars "+ map.keySet().size() +" "+
+				// varsNamesToCombine);
+			}
+		}
+
+		return allCombinations;
 	}
 
-	/**
-	 * Method that finds all combination of variables mappings Ex: if var 'a'
-	 * can be mapped to a1 and a2, and var 'b' to b1 and b2, the method return
-	 * all combinations (a1,b1), (a2,b1), (a1,b2), (a2,b2)
-	 * 
-	 * @param mappedVars
-	 *            map of variables (out-of-scope) and candidate replacements of
-	 * @param varsName
-	 *            names of all variables
-	 * @param indexVar
-	 *            current variable under analysis
-	 * @param currentCombination
-	 *            current combination of variables
-	 * @param allCombinations
-	 *            list that store all variable combinations
-	 */
-	public static void findAllVarMappingCombination(Map<VarWrapper, List<CtVariable>> mappedVars,
-			List<VarWrapper> varsName, int indexVar, Map<String, CtVariable> currentCombination,
-			List<Map<String, CtVariable>> allCombinations) {
+	public static Number[] getMaxCombination(Map<VarAccessWrapper, List<CtVariable>> mappedVars,
+			List<VarAccessWrapper> varsNamesToCombine) {
 
-		// Stop condition
-		// If we have analyzed all variables, we add the combination to the
-		// result
-		if (varsName.size() == indexVar) {
-			allCombinations.add(currentCombination);
-			return;
+		int maxNumberCombinations = ConfigurationProperties.getPropertyInt("maxVarCombination");
+
+		int max = -1;
+		long numberTotalComb = 1;
+		int nrVarsWithMorethan1Possibilities = 0;
+		Set<String> vars = new HashSet<>();
+		// Here the code for calculating the total number of combinations
+		for (VarAccessWrapper currentVar : varsNamesToCombine) {
+
+			if (vars.contains(currentVar.getVar().getVariable().getSimpleName())) {
+				continue;
+			}
+
+			vars.add(currentVar.getVar().getVariable().getSimpleName());
+
+			List<CtVariable> mapped = mappedVars.get(currentVar);
+			int numberCompVar = mapped.size();
+
+			if (numberCompVar > max)
+				max = numberCompVar;
+
+			if (numberCompVar > 1)
+				nrVarsWithMorethan1Possibilities++;
+
+			logger.debug(String.format("Number compatible vars of %s : %d",
+					currentVar.getVar().getVariable().getSimpleName(), numberCompVar));
+
+			if (numberTotalComb < Integer.MAX_VALUE) {
+				long mult = (long) numberTotalComb * numberCompVar;
+				if (mult > Integer.MAX_VALUE || mult < Integer.MIN_VALUE) {
+					logger.debug("Max Combination: Overflow 32-bit. Considering nrCombinations: " + Integer.MAX_VALUE);
+					numberTotalComb = Integer.MAX_VALUE;
+				} else
+					numberTotalComb *= numberCompVar;
+			}
 		}
 
-		// Get the variable to change
-		// CtVariableAccess currentVar = varsName.get(indexVar).getVar();
-		VarWrapper currentVar = varsName.get(indexVar);
-		// get all possibles variables to replace
-		List<CtVariable> mapped = mappedVars.get(currentVar);
+		logger.debug("Teoricalcombinations: " + numberTotalComb);
+		double maxPerVarLimit = 0;
 
-		if (currentCombination.containsKey(currentVar.getVar().getVariable().getSimpleName())) {
-			findAllVarMappingCombination(mappedVars, varsName, indexVar + 1, currentCombination, allCombinations);
+		if (numberTotalComb < maxNumberCombinations
+				|| !ConfigurationProperties.getPropertyBool("maxCombinationVariableLimit")) {
+			// We dont need to cut vars
+			maxPerVarLimit = max;
+		} else {
+			maxPerVarLimit = Math.pow(maxNumberCombinations, 1.0 / nrVarsWithMorethan1Possibilities);
 		}
 
-		// for each mapping candidate
-		for (CtVariable varFromMap : mapped) {
-			// we create the new var combination from the previous one
-			Map<String, CtVariable> newCombination = new TreeMap<>(currentCombination);
-			// we add the map for the variable to the new combination
-			newCombination.put(currentVar.getVar().getVariable().getSimpleName(), varFromMap);
-			// we call recursive to continue mapping the remaining variables
-			findAllVarMappingCombination(mappedVars, varsName, indexVar + 1, newCombination, allCombinations);
-		}
+		logger.debug(String.format("Max per var %f, total number comb: %d  ", maxPerVarLimit, numberTotalComb));
+
+		return new Number[] { numberTotalComb, maxPerVarLimit };
 	}
+
 }

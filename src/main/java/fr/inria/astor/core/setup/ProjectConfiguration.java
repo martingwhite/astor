@@ -60,11 +60,19 @@ public class ProjectConfiguration {
 		this.internalProperties.put(ProjectPropertiesEnum.workingDirBytecode, outDir);
 	}
 
-	public String getTestDirSrc() {
-		return (String) this.internalProperties.get(ProjectPropertiesEnum.testDirSrc);
+	public String getWorkingDirRoot() {
+		return (String) this.internalProperties.get(ProjectPropertiesEnum.workingDirRoot);
 	}
 
-	public void setTestDirSrc(String testPath) {
+	public void setWorkingDirRoot(String outDir) {
+		this.internalProperties.put(ProjectPropertiesEnum.workingDirRoot, outDir);
+	}
+
+	public List<String> getTestDirSrc() {
+		return (List<String>) this.internalProperties.get(ProjectPropertiesEnum.testDirSrc);
+	}
+
+	public void setTestDirSrc(List<String> testPath) {
 		this.internalProperties.put(ProjectPropertiesEnum.testDirSrc, testPath);
 	}
 
@@ -74,7 +82,7 @@ public class ProjectConfiguration {
 
 	public void setOriginalDirSrc(List<String> dirs) {
 		for (String sub : dirs) {
-			this.setOriginalDirSrc(getOriginalProjectRootDir() +File.separator + sub);
+			this.setOriginalDirSrc(sub);
 		}
 	}
 
@@ -104,9 +112,9 @@ public class ProjectConfiguration {
 	}
 
 	/**
-	 * Add the location given as parameters as project dependency. If the
-	 * location is a folder it adds all jar contained, if it's a file the method
-	 * directly add it.
+	 * Add the location given as parameters as project dependency. If the location
+	 * is a folder it adds all jar contained, if it's a file the method directly add
+	 * it.
 	 * 
 	 * @param path
 	 */
@@ -144,22 +152,21 @@ public class ProjectConfiguration {
 
 	}
 
-	public String getOriginalAppBinDir() {
-		return (String) this.internalProperties.get(ProjectPropertiesEnum.originalAppBinDir);
+	public List<String> getOriginalAppBinDir() {
+		return (List<String>) this.internalProperties.get(ProjectPropertiesEnum.originalAppBinDir);
 	}
 
-	public void setOriginalAppBinDir(String originalDirBin) {
+	public void setOriginalAppBinDir(List<String> originalDirBin) {
 		this.internalProperties.put(ProjectPropertiesEnum.originalAppBinDir, originalDirBin);
 	}
 
-	public String getOriginalTestBinDir() {
-		return (String) this.internalProperties.get(ProjectPropertiesEnum.originalTestBinDir);
+	public List<String> getOriginalTestBinDir() {
+		return (List<String>) this.internalProperties.get(ProjectPropertiesEnum.originalTestBinDir);
 	}
 
-	public void setOriginalTestBinDir(String dir) {
-		this.internalProperties.put(ProjectPropertiesEnum.originalTestBinDir, dir);
+	public void setOriginalTestBinDir(List<String> dirs) {
+		this.internalProperties.put(ProjectPropertiesEnum.originalTestBinDir, dirs);
 	}
-
 
 	public void setDependencies(String libPath) {
 		String[] s = libPath.split(File.pathSeparator);
@@ -253,9 +260,10 @@ public class ProjectConfiguration {
 		if (!javaFolder.exists()) {
 			return null;
 		}
+		String processOutput = "";
 		try {
 			jvmPath += File.separator + "java";
-			
+
 			List<String> command = new ArrayList<String>();
 			command.add(jvmPath);
 			command.add("-version");
@@ -266,13 +274,47 @@ public class ProjectConfiguration {
 			pb.directory(new File((ConfigurationProperties.getProperty("location"))));
 			Process p = pb.start();
 			BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()));
-			String fullVersion = br.readLine();
-			String version = fullVersion.split("\"")[1];
-			return version;
+
+			String line = null;
+			while ((line = br.readLine()) != null) {
+				if (line.contains("\"")) {
+					String version = line.split("\"")[1];
+					logger.info("Version of the JVM used: " + version);
+					return version;
+				}
+				processOutput += line;
+			}
+
 		} catch (Exception e) {
-			logger.error(e);
-			return null;
+			logger.error("Error retrieving java version: " + e);
 		}
+		logger.error("Error retrieving java version output obtained: \n" + processOutput);
+		return null;
 	}
 
+	public static boolean isJDKLowerThan8() {
+		Integer currentVersion = getJavaVersionOfJVM4Validation();
+		if (currentVersion == null)
+			return false;
+
+		return (currentVersion <= 7);
+	}
+
+	public static Integer getJavaVersionOfJVM4Validation() {
+		String jvmversion = ConfigurationProperties.properties.getProperty("jvmversion");
+		if (jvmversion == null || jvmversion.isEmpty()) {
+			logger.error("The property jvmversion is null or empty");
+			return null;
+		}
+
+		String[] versioncomponents = jvmversion.split("\\.");
+		if (versioncomponents.length < 3) {
+			logger.error("The property jvmversion has a format we cannot recognize: " + versioncomponents);
+			return null;
+		}
+		String sec = versioncomponents[1];
+		int currentVersion = Integer.valueOf(sec);
+
+		return currentVersion;
+	}
 }

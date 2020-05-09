@@ -1,8 +1,15 @@
 package fr.inria.main;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.nio.file.Files;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 
 import org.apache.commons.cli.BasicParser;
 import org.apache.commons.cli.CommandLine;
@@ -11,23 +18,36 @@ import org.apache.commons.cli.HelpFormatter;
 import org.apache.commons.cli.Options;
 import org.apache.commons.cli.UnrecognizedOptionException;
 import org.apache.log4j.Level;
-import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
 
-import fr.inria.astor.core.loop.AstorCoreEngine;
-import fr.inria.astor.core.loop.extension.SolutionVariantSortCriterion;
-import fr.inria.astor.core.loop.spaces.ingredients.IngredientSearchStrategy;
-import fr.inria.astor.core.loop.spaces.ingredients.scopes.AstorCtIngredientSpace;
-import fr.inria.astor.core.loop.spaces.operators.AstorOperator;
-import fr.inria.astor.core.loop.spaces.operators.OperatorSelectionStrategy;
-import fr.inria.astor.core.manipulation.MutationSupporter;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+
+import fr.inria.astor.core.entities.ProgramVariant;
+import fr.inria.astor.core.output.ReportResults;
 import fr.inria.astor.core.setup.ConfigurationProperties;
 import fr.inria.astor.core.setup.ProjectConfiguration;
 import fr.inria.astor.core.setup.ProjectRepairFacade;
 import fr.inria.astor.core.setup.RandomManager;
-import fr.inria.astor.core.validation.validators.ProgramValidator;
+import fr.inria.astor.core.solutionsearch.AstorCoreEngine;
+import fr.inria.astor.core.solutionsearch.extension.SolutionVariantSortCriterion;
+import fr.inria.astor.core.solutionsearch.extension.VariantCompiler;
+import fr.inria.astor.core.solutionsearch.population.FitnessFunction;
+import fr.inria.astor.core.solutionsearch.population.PopulationConformation;
+import fr.inria.astor.core.solutionsearch.population.PopulationController;
+import fr.inria.astor.core.solutionsearch.spaces.ingredients.IngredientSearchStrategy;
+import fr.inria.astor.core.solutionsearch.spaces.ingredients.scopes.AstorCtIngredientPool;
+import fr.inria.astor.core.solutionsearch.spaces.operators.AstorOperator;
+import fr.inria.astor.core.solutionsearch.spaces.operators.OperatorSelectionStrategy;
+import fr.inria.astor.core.solutionsearch.spaces.operators.OperatorSpace;
+import fr.inria.astor.core.validation.ProgramVariantValidator;
 import fr.inria.astor.util.TimeUtil;
-import spoon.reflect.factory.Factory;
+import fr.inria.main.evolution.ExtensionPoints;
+import spoon.Launcher;
+import spoon.OutputType;
+import spoon.SpoonModelBuilder.InputType;
 
 /**
  * Abstract entry point of the framework. It defines and manages program
@@ -40,17 +60,17 @@ public abstract class AbstractMain {
 
 	protected Logger log = Logger.getLogger(Thread.currentThread().getName());
 
-	protected MutationSupporter mutSupporter;
-	protected Factory factory;
-	protected ProjectRepairFacade projectFacade;
+	public static ProjectRepairFacade projectFacade;
 
-	static Options options = new Options();
+	protected static Options options = new Options();
 
 	CommandLineParser parser = new BasicParser();
 
 	static {
 		options.addOption("id", true, "(Optional) Name/identified of the project to evaluate (Default: folder name)");
-		options.addOption("mode", true, " (Optional) Mode (Default: Statement Mode)");
+		options.addOption("mode", true, " (Optional) Mode (Default: jGenProg Mode)");
+		options.addOption("autoconfigure", true,
+				" Auto-configure project. Must install https://github.com/tdurieux/project-info-maven-plugin");
 		options.addOption("location", true, "URL of the project to manipulate");
 		options.addOption("dependencies", true,
 				"dependencies of the application, separated by char " + File.pathSeparator);
@@ -77,9 +97,11 @@ public abstract class AbstractMain {
 
 		options.addOption("maxtime", true, "(Optional) maximum time (in minutes) to execute the whole experiment");
 
-		options.addOption("validation", true, "(Optional) type of validation: process|evosuite. Default:"
-				+ ConfigurationProperties.properties.getProperty("validation")
-				+ "It accepts custormize validation prodedures, which must extend from "+ProgramValidator.class.getCanonicalName());
+		options.addOption("validation", true,
+				"(Optional) type of validation: process|evosuite. Default:"
+						+ ConfigurationProperties.properties.getProperty("validation")
+						+ "It accepts custormize validation prodedures, which must extend from "
+						+ ProgramVariantValidator.class.getCanonicalName());
 		options.addOption("flthreshold", true, "(Optional) threshold for Fault locatication. Default:"
 				+ ConfigurationProperties.properties.getProperty("flthreshold"));
 
@@ -88,9 +110,16 @@ public abstract class AbstractMain {
 						+ ConfigurationProperties.properties.getProperty("maxsuspcandidates"));
 
 		options.addOption("reintroduce", true,
-				"(Optional) indicates whether it reintroduces the original program in each generation (value: original), "
-						+ " introduces parent variant in next generation (value: parents), "
-						+ "introduces origina and parents (value: original-parents) or none (value: none). (default: original-parents)");
+				"(Optional) indicates whether it reintroduces the original program in each generation (value: "
+						+ PopulationConformation.ORIGINAL.toString() + "), "
+						+ " reintroduces parent variant in next generation (value: "
+						+ PopulationConformation.PARENTS.toString() + "), "
+						+ " reintroduce the solution in the next generation (value: "
+						+ PopulationConformation.SOLUTIONS.toString() + ") "
+						+ " reintroduces origina and parents (value: original-parents) "
+						+ "or do not reintroduce nothing (value: none).  More than one option can be written, separated by: "
+						+ File.pathSeparator + "Default: "
+						+ ConfigurationProperties.properties.getProperty("reintroduce"));
 
 		options.addOption("tmax1", true,
 				"(Optional) maximum time (in miliseconds) for validating the failing test case ");
@@ -152,7 +181,8 @@ public abstract class AbstractMain {
 
 		options.addOption("scope", true,
 				"(Optional) Scope of the ingredient seach space: Local (same class), package (classes from the same package) or global (all classes from the application under analysis). Default: local."
-				+ " It accepts customize scopes, which must implement from "+AstorCtIngredientSpace.class.getCanonicalName());
+						+ " It accepts customize scopes, which must implement from "
+						+ AstorCtIngredientPool.class.getCanonicalName());
 
 		options.addOption("skipfaultlocalization", false,
 				"The fault localization is skipped and all statements are considered");
@@ -160,7 +190,7 @@ public abstract class AbstractMain {
 		options.addOption("maxdate", true,
 				"(Optional) Indicates the hour Astor has to stop processing. it must have the format: HH:mm");
 
-		options.addOption("customop", true,
+		options.addOption(ExtensionPoints.REPAIR_OPERATORS.identifier, true,
 				"(Optional) Indicates the class name of the operators used by the selected execution mode. They must extend from "
 						+ AstorOperator.class.getName() + ". Operator names must be separated by char "
 						+ File.pathSeparator + ". The classes must be included in the classpath.");
@@ -177,6 +207,18 @@ public abstract class AbstractMain {
 		options.addOption("customengine", true,
 				"(Optional) Indicates the class name of the execution mode. It must extend from "
 						+ AstorCoreEngine.class.getName());
+
+		options.addOption(ExtensionPoints.TARGET_CODE_PROCESSOR.identifier, true,
+				"(Optional) Indicates the class name of the process that selects target elements. They must extend from "
+						+ ExtensionPoints.TARGET_CODE_PROCESSOR._class.getName()
+						+ " The classes must be included in the classpath.");
+
+		for (ExtensionPoints epoint : ExtensionPoints.values()) {
+			if (!options.hasOption(epoint.identifier)) {
+				options.addOption(epoint.identifier, true, String
+						.format("Extension point %s. It must extend/implement from %s", epoint.name(), epoint._class));
+			}
+		}
 
 		options.addOption("excludeRegression", false, "Exclude test regression execution");
 
@@ -207,10 +249,49 @@ public abstract class AbstractMain {
 
 		options.addOption("timezone", true, "Timezone to be used in the process that Astor creates. Default: "
 				+ ConfigurationProperties.getProperty("timezone"));
-		
+
 		options.addOption("faultlocalization", true, "Class name of Fault locatication Strategy. Default:"
 				+ ConfigurationProperties.properties.getProperty("faultlocalization"));
 
+		options.addOption("fitnessfunction", true,
+				"(Optional) Class name of Fitness function for evaluating a variant. It must extend from "
+						+ FitnessFunction.class.getCanonicalName() + " The classes must be included in the classpath.");
+
+		options.addOption("outputresult", true,
+				"(Optional) Class name for manipulating the output. It must extend from "
+						+ ReportResults.class.getCanonicalName() + " The classes must be included in the classpath.");
+
+		options.addOption("populationcontroller", true,
+				"(Optional) class name that controls the population evolution. It must extend from  "
+						+ PopulationController.class.getCanonicalName()
+						+ " The classes must be included in the classpath.");
+
+		options.addOption("filterfaultlocalization", true, "Indicates whether Astor filters the FL output. Default:"
+				+ ConfigurationProperties.properties.getProperty("filterfaultlocalization"));
+
+		options.addOption("operatorspace", true,
+				"Operator Space contains the operators. It must extends from " + OperatorSpace.class.getName());
+
+		options.addOption("compiler", true,
+				"Class used for compile a Program variant.  It must extends from " + VariantCompiler.class.getName());
+
+		options.addOption("regressiontestcases4fl", true,
+				"Classes names of test cases used in the regression, separated by '" + File.pathSeparator
+						+ "' . If the argument it is not specified, Astor automatically calculates them.");
+
+		options.addOption("manipulatesuper", false, "Allows to manipulate 'super' statements. Disable by default.");
+
+		options.addOption("classestoinstrument", true, "List of classes names that Astor instrument, separated by '"
+				+ File.pathSeparator
+				+ "' . If the argument it is not specified, Astor uses all classes from the program under repair.");
+		options.addOption("maxVarCombination", true, "Max number of combinations per variable out-of-scope. Default: "
+				+ ConfigurationProperties.getPropertyInt("maxVarCombination"));
+
+		options.addOption("parameters", true, "Parameters, divided by " + File.pathSeparator);
+
+		options.addOption("autocompile", true, "wheteher auto compile");
+
+		options.addOption("runjava7code", false, "Validates on Java 7");
 
 	}
 
@@ -246,7 +327,6 @@ public abstract class AbstractMain {
 	}
 
 	public boolean processArguments(String[] args) throws Exception {
-		log.info("command line arguments: " + Arrays.toString(args).replace(",", " "));
 
 		ConfigurationProperties.clear();
 
@@ -293,6 +373,15 @@ public abstract class AbstractMain {
 		if (!ProjectConfiguration.validJDK()) {
 			System.err.println("Error: invalid jdk folder");
 			return false;
+		} else {
+			String jvmhome = ConfigurationProperties.properties.getProperty("jvm4testexecution");
+			String jdkVersion = ProjectConfiguration.getVersionJDK(jvmhome);
+			if (jdkVersion != null) {
+				ConfigurationProperties.properties.setProperty("jvmversion", jdkVersion);
+				log.info("Java version of the JDK used to run tests: " + jdkVersion);
+				log.info("The compliance of the JVM is:  " + ProjectConfiguration.getJavaVersionOfJVM4Validation());
+			} else
+				log.equals("Error: problems to determine the version of the JDK located at path: " + jvmhome);
 		}
 
 		if (!this.isExample(cmd)) {
@@ -311,7 +400,7 @@ public abstract class AbstractMain {
 			}
 
 			String failing = cmd.getOptionValue("failing");
-			if((failing != null))
+			if ((failing != null))
 				ConfigurationProperties.properties.setProperty("failing", failing);
 
 		}
@@ -349,9 +438,7 @@ public abstract class AbstractMain {
 
 		if (cmd.hasOption("flthreshold")) {
 			try {
-				double thfl = Double.valueOf(cmd.getOptionValue("flthreshold"));
 				ConfigurationProperties.properties.setProperty("flthreshold", cmd.getOptionValue("flthreshold"));
-
 			} catch (Exception e) {
 				System.out.println("Error: threshold not valid");
 				help();
@@ -382,6 +469,9 @@ public abstract class AbstractMain {
 
 		if (cmd.hasOption("testbystep"))
 			ConfigurationProperties.properties.setProperty("testbystep", "true");
+
+		if (cmd.hasOption("runjava7code"))
+			ConfigurationProperties.properties.setProperty("runjava7code", "true");
 
 		if (cmd.hasOption("modificationpointnavigation"))
 			ConfigurationProperties.properties.setProperty("modificationpointnavigation",
@@ -449,16 +539,23 @@ public abstract class AbstractMain {
 		if (cmd.hasOption("scope"))
 			ConfigurationProperties.properties.setProperty("scope", cmd.getOptionValue("scope"));
 
-		if (cmd.hasOption("customop"))
-			ConfigurationProperties.properties.setProperty("customop", cmd.getOptionValue("customop"));
+		if (cmd.hasOption(ExtensionPoints.REPAIR_OPERATORS.identifier))
+			ConfigurationProperties.properties.setProperty(ExtensionPoints.REPAIR_OPERATORS.identifier,
+					cmd.getOptionValue(ExtensionPoints.REPAIR_OPERATORS.identifier));
 
 		if (cmd.hasOption("ingredientstrategy"))
 			ConfigurationProperties.properties.setProperty("ingredientstrategy",
 					cmd.getOptionValue("ingredientstrategy"));
 
 		if (cmd.hasOption("opselectionstrategy"))
-			ConfigurationProperties.properties.setProperty("opselectionstrategy",
+			ConfigurationProperties.properties.setProperty(ExtensionPoints.OPERATOR_SELECTION_STRATEGY.identifier,
 					cmd.getOptionValue("opselectionstrategy"));
+
+		for (ExtensionPoints epoint : ExtensionPoints.values()) {
+			if (cmd.hasOption(epoint.identifier))
+				ConfigurationProperties.properties.setProperty(epoint.identifier,
+						cmd.getOptionValue(epoint.identifier));
+		}
 
 		if (cmd.hasOption("customengine"))
 			ConfigurationProperties.properties.setProperty("customengine", cmd.getOptionValue("customengine"));
@@ -495,20 +592,182 @@ public abstract class AbstractMain {
 
 		if (cmd.hasOption("loglevel")) {
 			String loglevelSelected = cmd.getOptionValue("loglevel");
-			LogManager.getRootLogger().setLevel(Level.toLevel(loglevelSelected));
+			ConfigurationProperties.properties.setProperty("loglevel", loglevelSelected);
 		}
 		if (cmd.hasOption("timezone")) {
 			ConfigurationProperties.properties.setProperty("timezone", cmd.getOptionValue("timezone"));
 		}
-		
+
 		if (cmd.hasOption("faultlocalization")) {
-			ConfigurationProperties.properties.setProperty("faultlocalization", cmd.getOptionValue("faultlocalization"));
+			ConfigurationProperties.properties.setProperty("faultlocalization",
+					cmd.getOptionValue("faultlocalization"));
 		}
-		
+
+		if (cmd.hasOption("fitnessfunction")) {
+			ConfigurationProperties.properties.setProperty("fitnessfunction", cmd.getOptionValue("fitnessfunction"));
+		}
+
+		if (cmd.hasOption("outputresult")) {
+			ConfigurationProperties.properties.setProperty("outputresult", cmd.getOptionValue("outputresult"));
+		}
+
+		if (cmd.hasOption("populationcontroller")) {
+			ConfigurationProperties.properties.setProperty("populationcontroller",
+					cmd.getOptionValue("populationcontroller"));
+		}
+		if (cmd.hasOption("filterfaultlocalization"))
+			ConfigurationProperties.properties.setProperty("filterfaultlocalization",
+					cmd.getOptionValue("filterfaultlocalization"));
+
+		if (cmd.hasOption("operatorspace"))
+			ConfigurationProperties.properties.setProperty("operatorspace", cmd.getOptionValue("operatorspace"));
+
+		if (cmd.hasOption("compiler"))
+			ConfigurationProperties.properties.setProperty("compiler", cmd.getOptionValue("compiler"));
+
+		if (cmd.hasOption("regressiontestcases4fl"))
+			ConfigurationProperties.properties.setProperty("regressiontestcases4fl",
+					cmd.getOptionValue("regressiontestcases4fl"));
+
+		if (cmd.hasOption("manipulatesuper"))
+			ConfigurationProperties.properties.setProperty("manipulatesuper", Boolean.TRUE.toString());
+
+		if (cmd.hasOption("classestoinstrument"))
+			ConfigurationProperties.properties.setProperty("classestoinstrument",
+					cmd.getOptionValue("classestoinstrument"));
+
+		if (cmd.hasOption("maxVarCombination"))
+			ConfigurationProperties.properties.setProperty("maxVarCombination",
+					cmd.getOptionValue("maxVarCombination"));
+
+		if (cmd.hasOption("parameters")) {
+			String[] pars = cmd.getOptionValue("parameters").split(File.pathSeparator);
+			for (int i = 0; i < pars.length; i = i + 2) {
+				String key = pars[i];
+				String value = pars[i + 1];
+				ConfigurationProperties.properties.setProperty(key, value);
+
+			}
+		}
+
+		processOtherCommands(cmd);
+
+		if (cmd.hasOption("autocompile"))
+			ConfigurationProperties.properties.setProperty("autocompile", cmd.getOptionValue("autocompile"));
+
+		boolean autoconfigure = cmd.hasOption("autoconfigure") //
+				&& Boolean.valueOf(cmd.getOptionValue("autoconfigure"));
+		if (autoconfigure || ConfigurationProperties.getPropertyBool("autoconfigure")) {
+			executeAutoConfigure(ConfigurationProperties.properties.getProperty("location"));
+		}
+
+		log.info("command line arguments: " + Arrays.toString(args).replace(",", " "));
+
 		// CLG believes, but is not totally confident in her belief, that this
 		// is a reasonable place to initialize the random number generator.
 		RandomManager.initialize();
 		return true;
+	}
+
+	public void processOtherCommands(CommandLine cmd) {
+		// Subclass can override this method
+	}
+
+	private void executeAutoConfigure(String location) throws IOException {
+
+		log.debug("Determining project properties from " + location);
+		ProcessBuilder builder = new ProcessBuilder();
+
+		String mvnCommand = getMvnCommand();
+		if (mvnCommand == null || mvnCommand.trim().isEmpty()) {
+			throw new IllegalArgumentException(
+					"To execute autoconfigure please add the maven command in your path or add it to the property 'mvndir'");
+		}
+		String projectInfoCommand = ConfigurationProperties.getProperty("projectinfocommand");
+		builder.command(mvnCommand, projectInfoCommand, "-q");
+
+		builder.directory(new File(location));
+
+		Process process = builder.start();
+
+		BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+		String content = "";
+		String line;
+		while ((line = reader.readLine()) != null) {
+			content += line + "\n";
+		}
+		log.debug(content);
+		JsonElement jelement = new JsonParser().parse(content);
+		JsonObject jobject = jelement.getAsJsonObject();
+
+		String basedir = jobject.get("baseDir").getAsString();
+		String compliance = jobject.get("complianceLevel").toString();
+		JsonArray sources = jobject.get("sources").getAsJsonArray();
+		JsonArray binSources = jobject.get("binSources").getAsJsonArray();
+		JsonArray binTests = jobject.get("binTests").getAsJsonArray();
+		JsonArray tests = jobject.get("tests").getAsJsonArray();
+		JsonArray classpath = jobject.get("classpath").getAsJsonArray();
+
+		String testProp = getJoin(tests).replace(basedir, "");
+		String sourcesP = getJoin(sources).replace(basedir, "");
+		String binSourcesP = getJoin(binSources).replace(basedir, "");
+		String binTestsP = getJoin(binTests).replace(basedir, "");
+		String classpathP = getJoin(classpath);
+
+		log.debug("basedir: " + basedir);
+		log.debug("test: " + testProp);
+		log.debug("sources: " + sourcesP);
+		log.debug("binSourceP: " + binSourcesP);
+		log.debug("binTests: " + binTestsP);
+		log.debug("classpath: " + classpathP);
+		log.debug("compliance: " + compliance);
+
+		if (sourcesP.isEmpty()) {
+			throw new IllegalAccessError("Source folder could not be determined.");
+		}
+		ConfigurationProperties.properties.setProperty("javacompliancelevel", compliance);
+		ConfigurationProperties.properties.setProperty("srcjavafolder", sourcesP);
+		ConfigurationProperties.properties.setProperty("srctestfolder", testProp);
+		ConfigurationProperties.properties.setProperty("binjavafolder", binSourcesP);
+		ConfigurationProperties.properties.setProperty("bintestfolder", binTestsP);
+		ConfigurationProperties.properties.setProperty("dependenciespath", classpathP);
+
+	}
+
+	private String getJoin(JsonArray array) {
+		Iterator<JsonElement> it = array.iterator();
+		String result = "";
+		while (it.hasNext()) {
+			String element = it.next().getAsString();
+			result += element + File.pathSeparator;
+		}
+		if (result.length() > 0) {
+			// remove the last separator
+			result = result.substring(0, result.length() - 1);
+		}
+
+		return result;
+	}
+
+	public static String getMvnCommand() {
+		String mvnCommand = ConfigurationProperties.getProperty("mvndir");
+		if (mvnCommand == null) {
+			mvnCommand = findExecutableOnPath("mvn");
+		}
+		return mvnCommand;
+
+	}
+
+	public static String findExecutableOnPath(String name) {
+		Map p = System.getenv();
+		for (String dirname : System.getenv("PATH").split(File.pathSeparator)) {
+			File file = new File(dirname, name);
+			System.out.println(file + " " + file.exists());
+			if (file.isFile() && file.canExecute()) {
+				return file.getAbsolutePath();
+			}
+		}
+		return null;
 	}
 
 	/**
@@ -525,10 +784,10 @@ public abstract class AbstractMain {
 		String dependenciespath = null, folder = null, failing = null, location = null, packageToInstrument = null;
 		double faultLocalizationThreshold = 0;
 		if (cmd.hasOption("bug280")) {
-			dependenciespath = "examples/math_85/libs/junit-4.4.jar";
+			dependenciespath = new File("./examples/math_85/libs/junit-4.4.jar").getAbsolutePath();
 			folder = "Math-issue-280";
 			failing = "org.apache.commons.math.distribution.NormalDistributionTest";
-			location = "examples/Math-issue-280/";
+			location = new File("./examples/Math-issue-280/").getAbsolutePath();
 			packageToInstrument = "org.apache.commons";
 			faultLocalizationThreshold = 0.2;
 		}
@@ -586,7 +845,43 @@ public abstract class AbstractMain {
 
 	}
 
-	protected ProjectRepairFacade getProject(String location, String projectIdentifier, String method,
+	/**
+	 * Compile the original code
+	 * 
+	 * @param properties
+	 */
+	protected void compileProject(ProjectConfiguration properties) {
+		final Launcher launcher = new Launcher();
+		for (String path_src : properties.getOriginalDirSrc()) {
+			log.debug("Add folder to compile: " + path_src);
+			launcher.addInputResource(path_src);
+		}
+
+		for (String path_test : properties.getTestDirSrc()) {
+			log.debug("Add folder to compile: " + path_test);
+			launcher.addInputResource(path_test);
+		}
+
+		String binoutput = properties.getWorkingDirForBytecode() + File.separator
+				+ (ProgramVariant.DEFAULT_ORIGINAL_VARIANT);
+		launcher.setBinaryOutputDirectory(binoutput);
+
+		log.info("Compiling original code from " + launcher.getModelBuilder().getInputSources()
+				+ "\n bytecode saved in " + launcher.getModelBuilder().getBinaryOutputDirectory());
+
+		launcher.getEnvironment()
+				.setPreserveLineNumbers(ConfigurationProperties.getPropertyBool("preservelinenumbers"));
+		launcher.getEnvironment().setComplianceLevel(ConfigurationProperties.getPropertyInt("javacompliancelevel"));
+		launcher.getEnvironment().setShouldCompile(true);
+		launcher.getEnvironment().setSourceClasspath(properties.getDependenciesString().split(File.pathSeparator));
+		launcher.buildModel();
+		launcher.getModelBuilder().generateProcessedSourceFiles(OutputType.COMPILATION_UNITS);
+		launcher.getModelBuilder().compile(InputType.FILES);
+		// launcher.getModelBuilder().generateProcessedSourceFiles(OutputType.CLASSES);
+
+	}
+
+	protected ProjectRepairFacade getProjectConfiguration(String location, String projectIdentifier, String method,
 			List<String> failingTestCases, String dependencies, boolean srcWithMain) throws Exception {
 
 		if (projectIdentifier == null || projectIdentifier.equals("")) {
@@ -594,27 +889,44 @@ public abstract class AbstractMain {
 			projectIdentifier = locFile.getName();
 		}
 
-		String key = File.separator + method + "-" + projectIdentifier + File.separator;
-		String workingDirForSource = ConfigurationProperties.getProperty("workingDirectory") + key + "/src/";
-		String workingDirForBytecode = ConfigurationProperties.getProperty("workingDirectory") + key + "/bin/";
+		String projectUnderRepairKeyFolder = File.separator + method + "-" + projectIdentifier + File.separator;
+		String workingdir = ConfigurationProperties.getProperty("workingDirectory");
+		String workingDirForSource = workingdir + projectUnderRepairKeyFolder + "/src/";
+		String workingDirForBytecode = workingdir + projectUnderRepairKeyFolder + "/bin/";
 		String originalProjectRoot = location + File.separator;
-
 		ProjectConfiguration properties = new ProjectConfiguration();
+		properties.setWorkingDirRoot(workingdir + projectUnderRepairKeyFolder);
 		properties.setWorkingDirForSource(workingDirForSource);
 		properties.setWorkingDirForBytecode(workingDirForBytecode);
-		properties.setOriginalAppBinDir(
-				originalProjectRoot + File.separator + ConfigurationProperties.getProperty("binjavafolder"));
-		properties.setOriginalTestBinDir(
-				originalProjectRoot + File.separator + ConfigurationProperties.getProperty("bintestfolder"));
+
 		properties.setFixid(projectIdentifier);
 
 		properties.setOriginalProjectRootDir(originalProjectRoot);
 
-		List<String> src = determineMavenFolders(srcWithMain, originalProjectRoot);
-		properties.setOriginalDirSrc(src);
+		determineSourceFolders(properties, srcWithMain, originalProjectRoot);
 
 		if (dependencies != null) {
 			properties.setDependencies(dependencies);
+		}
+
+		if (!ConfigurationProperties.getPropertyBool("autocompile")) {
+
+			String paramBinFolder = ConfigurationProperties.getProperty("binjavafolder");
+			if (paramBinFolder == null || paramBinFolder.trim().isEmpty()) {
+				throw new IllegalArgumentException("The bin folders for java src do not exist.");
+			} else {
+				String[] singleFolders = paramBinFolder.split(File.pathSeparator);
+				List<String> originalBin = determineBinFolder(originalProjectRoot, singleFolders);
+				properties.setOriginalAppBinDir(originalBin);
+			}
+			String paramBinTestFolder = ConfigurationProperties.getProperty("bintestfolder");
+			if (paramBinTestFolder == null || paramBinTestFolder.trim().isEmpty()) {
+				throw new IllegalArgumentException("The bin folders  for tests do not exist.");
+			} else {
+				String[] singleBinTestFolders = paramBinTestFolder.split(File.pathSeparator);
+				List<String> originalBinTest = determineBinFolder(originalProjectRoot, singleBinTestFolders);
+				properties.setOriginalTestBinDir(originalBinTest);
+			}
 		}
 
 		properties.setFailingTestCases(failingTestCases);
@@ -628,28 +940,95 @@ public abstract class AbstractMain {
 		return ce;
 	}
 
-	private List<String> determineMavenFolders(boolean srcWithMain, String originalProjectRoot) {
+	private List<String> determineBinFolder(String originalProjectRoot, String[] singleFolders) {
 
-		File srcdefault = new File(
-				originalProjectRoot + File.separator + ConfigurationProperties.getProperty("srcjavafolder"));
+		List<String> bins = new ArrayList();
 
-		File testdefault = new File(
-				originalProjectRoot + File.separator + ConfigurationProperties.getProperty("srctestfolder"));
+		for (String folder : singleFolders) {
 
-		if (srcdefault.exists() && testdefault.exists())
-			return Arrays.asList(new String[] { ConfigurationProperties.getProperty("srcjavafolder"),
-					ConfigurationProperties.getProperty("srctestfolder") });
+			if (folder.trim().isEmpty()) {
+				throw new IllegalArgumentException("The bin folder is empty");
+			}
 
-		File src = new File(originalProjectRoot + File.separator + "src/main/java");
-		if (src.exists())
-			return Arrays.asList(new String[] { "src/main/java", "src/test/java" });
+			File fBin = new File(originalProjectRoot + File.separator + folder).getAbsoluteFile();
+			if (Files.exists(fBin.toPath())) {
+				bins.add(fBin.getAbsolutePath());
+			} else
+				throw new IllegalArgumentException("The bin folder  " + fBin + " does not exist.");
+		}
+		return bins;
+	}
 
-		src = new File(originalProjectRoot + File.separator + "src/java");
-		if (src.exists())
-			return Arrays.asList(new String[] { "src/java", "src/test" });
+	private List<String> determineSourceFolders(ProjectConfiguration properties, boolean srcWithMain,
+			String originalProjectRoot) throws IOException {
 
-		return Arrays.asList(new String[] { "src", "test" });
+		final boolean onlyOneFolder = true;
 
+		List<String> sourceFolders = new ArrayList<>();
+
+		String paramSrc = ConfigurationProperties.getProperty("srcjavafolder");
+
+		String[] srcs = paramSrc.split(File.pathSeparator);
+		// adding src from parameter
+		addToFolder(sourceFolders, srcs, originalProjectRoot, !onlyOneFolder);
+		if (sourceFolders.isEmpty()) {
+			// Adding src folders by guessing potential folders
+			String[] possibleSrcFolders = new String[] { (originalProjectRoot + File.separator + "src/main/java"),
+					(originalProjectRoot + File.separator + "src/java"),
+					(originalProjectRoot + File.separator + "src"), };
+
+			addToFolder(sourceFolders, possibleSrcFolders, originalProjectRoot, onlyOneFolder);
+		}
+		log.info("Source folders: " + sourceFolders);
+		properties.setOriginalDirSrc(sourceFolders);
+
+		// Now test folder
+		String paramTestSrc = ConfigurationProperties.getProperty("srctestfolder");
+
+		List<String> sourceTestFolders = new ArrayList<>();
+
+		// adding test folder from the argument
+		String[] srcTs = paramTestSrc.split(File.pathSeparator);
+		addToFolder(sourceTestFolders, srcTs, originalProjectRoot, !onlyOneFolder);
+		if (sourceTestFolders.isEmpty()) {
+			// Adding src test folders by guessing potential folders
+			String[] possibleTestSrcFolders = new String[] { (originalProjectRoot + File.separator + "src/test/java"),
+					(originalProjectRoot + File.separator + "src/test"),
+					(originalProjectRoot + File.separator + "test"), };
+
+			addToFolder(sourceTestFolders, possibleTestSrcFolders, originalProjectRoot, onlyOneFolder);
+		}
+		log.info("Source Test folders: " + sourceTestFolders);
+		properties.setTestDirSrc(sourceTestFolders);
+
+		return sourceFolders;
+
+	}
+
+	private void addToFolder(List<String> pathResults, String[] possibleTestSrcFolders, String originalProjectRoot,
+			boolean onlyOne) throws IOException {
+		boolean added = false;
+		for (String possibleSrc : possibleTestSrcFolders) {
+			File fSrc = new File(File.separator + possibleSrc).getAbsoluteFile();
+			if (Files.exists(fSrc.toPath())) {
+				if (!pathResults.contains(fSrc.getAbsolutePath())) {
+					pathResults.add(fSrc.getAbsolutePath());
+					added = true;
+				}
+
+			} else {
+				File fSrcRelative = new File(originalProjectRoot + File.separator + possibleSrc);
+				if (Files.isDirectory(fSrcRelative.toPath())) {
+					if (!pathResults.contains(fSrcRelative.getAbsolutePath())) {
+						pathResults.add(fSrcRelative.getAbsolutePath());
+						added = true;
+					}
+				}
+
+			}
+			if (onlyOne && added)
+				break;
+		}
 	}
 
 }

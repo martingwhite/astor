@@ -16,13 +16,15 @@ import java.util.stream.Collectors;
 
 import org.apache.log4j.Logger;
 
+import fr.inria.astor.approaches.extensions.minimpact.validator.ProcessEvoSuiteValidator;
 import fr.inria.astor.core.entities.ProgramVariant;
-import fr.inria.astor.core.entities.ProgramVariantValidationResult;
+import fr.inria.astor.core.entities.validation.TestCaseVariantValidationResult;
 import fr.inria.astor.core.manipulation.MutationSupporter;
+import fr.inria.astor.core.manipulation.bytecode.compiler.SpoonClassCompiler;
 import fr.inria.astor.core.manipulation.bytecode.entities.CompilationResult;
 import fr.inria.astor.core.setup.ConfigurationProperties;
 import fr.inria.astor.core.setup.ProjectRepairFacade;
-import fr.inria.astor.core.validation.validators.ProcessEvoSuiteValidator;
+import fr.inria.astor.core.solutionsearch.extension.VariantCompiler;
 import spoon.reflect.declaration.CtClass;
 import spoon.reflect.declaration.CtType;
 
@@ -51,14 +53,13 @@ public class EvoSuiteFacade {
 	 */
 	public boolean runEvosuite(ProgramVariant variant, ProjectRepairFacade projectFacade, String outES)
 			throws Exception {
-		//If the variant does not have operators, we use all classes. 
-		List<CtType<?>> types = (!variant.computeAffectedClassesByOperators().isEmpty())?
-				variant.computeAffectedClassesByOperators(): variant.getAffectedClasses();
-		
-		List<String> affectedTypes = types.stream().
-				map(e -> e.getQualifiedName()).collect(Collectors.toList());
+		// If the variant does not have operators, we use all classes.
+		List<CtType<?>> types = (!variant.computeAffectedClassesByOperators().isEmpty())
+				? variant.computeAffectedClassesByOperators() : variant.getAffectedClasses();
 
-		return runEvosuite(variant, affectedTypes,projectFacade, outES, true);
+		List<String> affectedTypes = types.stream().map(e -> e.getQualifiedName()).collect(Collectors.toList());
+
+		return runEvosuite(variant, affectedTypes, projectFacade, outES, true);
 	}
 
 	/**
@@ -71,8 +72,8 @@ public class EvoSuiteFacade {
 	 * @return
 	 * @throws Exception
 	 */
-	public boolean runEvosuite(ProgramVariant variant, List<String> testToCreate,ProjectRepairFacade projectFacade, String outES,
-			boolean processOriginal) throws Exception {
+	public boolean runEvosuite(ProgramVariant variant, List<String> testToCreate, ProjectRepairFacade projectFacade,
+			String outES, boolean processOriginal) throws Exception {
 		int nrGenerated = 0;
 		List<URL> originalURL = new ArrayList<>(
 				Arrays.asList(projectFacade.getClassPathURLforProgramVariant(ProgramVariant.DEFAULT_ORIGINAL_VARIANT)));
@@ -86,19 +87,18 @@ public class EvoSuiteFacade {
 			originalURL.add(0, fByteOutput.toURL());
 		}
 
-		logger.debug("---> creating evosuite tests for: "+testToCreate);
+		logger.debug("---> creating evosuite tests for: " + testToCreate);
 
 		File fESout = new File(outES);
 		fESout.mkdirs();
 
 		URL[] SUTClasspath = originalURL.toArray(new URL[0]);
 
-		
 		logger.debug("Creating test cases using evosuite for: " + testToCreate.size() + " classes, mode: "
 				+ ((ConfigurationProperties.getPropertyBool("evoDSE")) ? "DSE" : "LS"));
 
 		long init = System.currentTimeMillis();
-		
+
 		boolean reponse = true;
 		int counter = 0;
 		for (String ctType : testToCreate) {
@@ -109,28 +109,33 @@ public class EvoSuiteFacade {
 			};
 			String[] defaultsParameters = null;
 			String defaultESParameters = ConfigurationProperties.getProperty("ESParameters");
-			if(defaultESParameters != null && !"".equals(defaultESParameters.trim())){
-				if(!(defaultESParameters.contains("-seed") || defaultESParameters.contains("-Drandom_seed"))){
-					defaultESParameters+= (defaultESParameters.charAt(defaultESParameters.length() - 1) != File.pathSeparatorChar)?
-							(File.pathSeparator):"";
-					defaultESParameters+="-Drandom_seed"+(File.pathSeparator)+ConfigurationProperties.getProperty("seed"); 
+			if (defaultESParameters != null && !"".equals(defaultESParameters.trim())) {
+				if (!(defaultESParameters.contains("-seed") || defaultESParameters.contains("-Drandom_seed"))) {
+					defaultESParameters += (defaultESParameters
+							.charAt(defaultESParameters.length() - 1) != File.pathSeparatorChar) ? (File.pathSeparator)
+									: "";
+					defaultESParameters += "-Drandom_seed" + (File.pathSeparator)
+							+ ConfigurationProperties.getProperty("seed");
 				}
 				defaultsParameters = defaultESParameters.split(File.pathSeparator);
-			}else{
-				 defaultsParameters =  new String[] {
-						 //Default options:
-						 "-Dglobal_timeout", Integer.toString(2 * Integer.valueOf(ConfigurationProperties.getProperty("evosuitetimeout")))//Before commented
+			} else {
+				defaultsParameters = new String[] {
+						// Default options:
+						"-Dglobal_timeout",
+						Integer.toString(2 * Integer.valueOf(ConfigurationProperties.getProperty("evosuitetimeout")))// Before
+																														// commented
 						, "-seed", ConfigurationProperties.getProperty("seed")//
-						, "-Drandom_seed", ConfigurationProperties.getProperty("seed"),//
-						"-Dsearch_budget",ConfigurationProperties.getProperty("evosuitetimeout"),// 
-						////Stopping conditions options: [MAXSTATEMENTS, MAXTESTS, MAXTIME, MAXGENERATIONS, MAXFITNESSEVALUATIONS, TIMEDELTA])
-						"-Dstopping_condition","MaxTime",
-						"-Dsandbox","false",//
-						"-Dno_runtime_dependency","true",//
-						"-mem","2000"};//
+						, "-Drandom_seed", ConfigurationProperties.getProperty("seed"), //
+						"-Dsearch_budget", ConfigurationProperties.getProperty("evosuitetimeout"), //
+						//// Stopping conditions options: [MAXSTATEMENTS,
+						//// MAXTESTS, MAXTIME, MAXGENERATIONS,
+						//// MAXFITNESSEVALUATIONS, TIMEDELTA])
+						"-Dstopping_condition", "MaxTime", "-Dsandbox", "false", //
+						"-Dno_runtime_dependency", "true", //
+						"-mem", "2000" };//
 			}
 			command = StringUtil.concat(command, defaultsParameters);
-			
+
 			if (ConfigurationProperties.getPropertyBool("evoDSE")) {
 
 				String[] dse = new String[] { "-Dlocal_search_rate", "2", // "8",
@@ -144,16 +149,16 @@ public class EvoSuiteFacade {
 				command = StringUtil.concat(command, dse);
 			}
 
-			logger.debug(
-					"Creating test for " + ctType + " " + (++counter) + "/" + testToCreate.size());
+			logger.debug("Creating test for " + ctType + " " + (++counter) + "/" + testToCreate.size());
 			boolean sucess = runProcess(null, command);
 			logger.debug("---> Evo OK? " + sucess + " ");
 			reponse &= sucess;
 			nrGenerated += (sucess) ? 1 : 0;
 
 		}
-		long time = (System.currentTimeMillis() - init)/1000;
-		logger.debug("Evo end in total "+time+" seconds for generating " + nrGenerated + " over " + testToCreate.size());
+		long time = (System.currentTimeMillis() - init) / 1000;
+		logger.debug(
+				"Evo end in total " + time + " seconds for generating " + nrGenerated + " over " + testToCreate.size());
 		return reponse;
 	}
 
@@ -223,7 +228,6 @@ public class EvoSuiteFacade {
 
 			List<String> command = new ArrayList<String>();
 			command.add(javaPath);
-			command.add("-Xbootclasspath/p:"+ (new File("./lib/fixran-0.0.1.jar").getAbsolutePath()));
 			command.add("-jar");
 			command.add(new File(ConfigurationProperties.getProperty("evosuitejar")).getAbsolutePath());
 
@@ -240,13 +244,13 @@ public class EvoSuiteFacade {
 			p.waitFor((ConfigurationProperties.getPropertyInt("evosuitetimeout") * 2 * 1000), TimeUnit.MILLISECONDS);
 
 			String out = readOut(p);
-			logger.debug("ES generation output: \n "+out);
-			p.destroy();
+			logger.debug("ES generation output: \n " + out);
+			p.destroyForcibly();
 			return true;
 		} catch (IOException | InterruptedException | IllegalThreadStateException ex) {
 			logger.error(ex.getMessage(), ex);
 			if (p != null)
-				p.destroy();
+				p.destroyForcibly();
 		}
 		return false;
 	}
@@ -256,19 +260,21 @@ public class EvoSuiteFacade {
 		logger.debug("Es dir content: " + Arrays.toString(new File(evoTestpath).listFiles()));
 		MutationSupporter mutatorSupporter = MutationSupporter.currentSupporter;
 		String codeLocation = evoTestpath;
-		boolean saveOutput = false;
+
 		try {
-			mutatorSupporter.buildModel(codeLocation, classpath, saveOutput);
+			MutationSupporter.getFactory().getModel().setBuildModelIsFinished(false); // avoid getting errors when trying to build back the model
+			mutatorSupporter.buildModel(codeLocation, classpath);
 		} catch (Exception e) {
 			e.printStackTrace();
 			logger.error(e.getMessage());
-			mutatorSupporter.getFactory().getEnvironment()
+			MutationSupporter.getFactory().getModel().setBuildModelIsFinished(false); // avoid getting errors when trying to build back the model
+			MutationSupporter.getFactory().getEnvironment()
 					.setComplianceLevel(ConfigurationProperties.getPropertyInt("alternativecompliancelevel"));
-			mutatorSupporter.buildModel(codeLocation, classpath, saveOutput);
+			mutatorSupporter.buildModel(codeLocation, classpath);
 
 		}
 
-		List<CtType<?>> allTypes = mutatorSupporter.getFactory().Type().getAll();
+		List<CtType<?>> allTypes = MutationSupporter.getFactory().Type().getAll();
 		List<CtClass> ESTestClasses = new ArrayList<>();
 		for (CtType<?> ctType : allTypes) {
 			if (ctType.getSimpleName().endsWith(EVOSUITE_SUFFIX)
@@ -328,21 +334,23 @@ public class EvoSuiteFacade {
 
 	}
 
-	public ProgramVariantValidationResult saveAndExecuteEvoSuite(ProjectRepairFacade projectFacade,
+	public TestCaseVariantValidationResult saveAndExecuteEvoSuite(ProjectRepairFacade projectFacade,
 			ProgramVariant variant, List<CtClass> ctclasses) throws Exception {
 
 		String classpathForCompileSpoon = "";
 		classpathForCompileSpoon = projectFacade.getProperties().getDependenciesString() + File.pathSeparator
 				+ projectFacade.getOutDirWithPrefix(variant.currentMutatorIdentifier()) + File.pathSeparator//
 				+ new File(ConfigurationProperties.getProperty("evosuitejar")).getAbsolutePath() + File.pathSeparator
-				+ projectFacade.getOutDirWithPrefix(variant.DEFAULT_ORIGINAL_VARIANT);
+				+ projectFacade.getOutDirWithPrefix(variant.DEFAULT_ORIGINAL_VARIANT) + File.pathSeparator
+				+ System.getProperty("java.class.path");
+		;
 
 		logger.info("Classpath " + classpathForCompileSpoon);
 		String[] classpathForCreateModel = classpathForCompileSpoon.split(File.pathSeparator);
 
 		// Compile evo classes from spoon model
-		CompilationResult compilation = MutationSupporter.currentSupporter.getSpoonClassCompiler()
-				.compileOnMemory(ctclasses, Converters.toURLArray(classpathForCreateModel));
+		VariantCompiler compiler = new SpoonClassCompiler(MutationSupporter.getFactory());
+		CompilationResult compilation = compiler.compile(ctclasses, Converters.toURLArray(classpathForCreateModel));
 
 		if (!compilation.compiles() || compilation.getByteCodes().values().isEmpty()) {
 			logger.error("Error at compiling evotest classes");
@@ -355,7 +363,7 @@ public class EvoSuiteFacade {
 				.getOutDirWithPrefix("/evosuite/evosuite-tests_" + variant.currentMutatorIdentifier());
 		File fbyteEvo = new File(outPutTest);
 		logger.info("Saving evotest bytecode at " + fbyteEvo);
-		MutationSupporter.currentSupporter.getSpoonClassCompiler().saveByteCode(compilation, fbyteEvo);
+		MutationSupporter.currentSupporter.getOutput().saveByteCode(compilation, fbyteEvo);
 
 		List<String> testToExecute = new ArrayList<>();
 		for (CtClass evoTest : ctclasses) {
@@ -363,11 +371,13 @@ public class EvoSuiteFacade {
 				testToExecute.add(evoTest.getQualifiedName());
 		}
 
-		String classpathForRunTest = classpathForCompileSpoon + (File.pathSeparator) + outPutTest;
+		String classpathForRunTest = classpathForCompileSpoon + (File.pathSeparator) + outPutTest + File.pathSeparator
+				+ System.getProperty("java.class.path");
+		;
 		logger.info("Process classpath " + classpathForRunTest);
 
 		ProcessEvoSuiteValidator evoProcess = new ProcessEvoSuiteValidator();
-		ProgramVariantValidationResult evoResult = evoProcess.executeRegressionTesting(
+		TestCaseVariantValidationResult evoResult = evoProcess.executeRegressionTesting(
 				Converters.toURLArray(classpathForRunTest.split(File.pathSeparator)), testToExecute);
 
 		return evoResult;
@@ -375,7 +385,7 @@ public class EvoSuiteFacade {
 
 	private String readOut(Process p) {
 		String out = "";
-		String all = "" ;
+		String all = "";
 		try {
 			BufferedReader in = new BufferedReader(new InputStreamReader(p.getInputStream()));
 			String line;
@@ -384,9 +394,9 @@ public class EvoSuiteFacade {
 					out += line + "\n";
 				}
 				all += line + "\n";
-				
+
 			}
-			if("".equals(out)){
+			if ("".equals(out)) {
 				return all;
 			}
 		} catch (Exception e) {
@@ -424,7 +434,6 @@ public class EvoSuiteFacade {
 	public static void runProcess(String[] command) throws Exception {
 		logger.debug("Executing compilation : " + Arrays.toString(command));
 		Process pro = Runtime.getRuntime().exec(command);
-		// printLines(command + " stdout:", pro.getInputStream());
 		printLines(command + " stderr:", pro.getErrorStream());
 		pro.waitFor();
 		logger.debug(command + " exitValue() " + pro.exitValue());
